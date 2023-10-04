@@ -10,3 +10,6 @@ Procedure to run:
 1) python preprocess.py
 2) python pretrain.py
 3) python main.py
+
+
+Note: This code requires PyTorch and torch-geometric to run.
