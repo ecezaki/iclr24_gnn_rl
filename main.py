@@ -1,7 +1,9 @@
 import pandas as pd
 import numpy as np
 from gnn_dqn_agent import *
+from preprocessing_small import preprocess
 from feature_extractor import *
+import random
 
 import collections
 from collections import Counter
@@ -20,7 +22,7 @@ import numpy as np
 import pandas as pd
 pd.options.display.max_rows = 10
 from sklearn import metrics
-#from tensorly import decomposition
+
 
 import torch
 from torch.functional import tensordot
@@ -32,22 +34,28 @@ from torch_geometric.typing import Adj
 import pickle
 
 
+# episodes, train_set, test_set = preprocess()
 
 rating_threshold = 3  #@param {type: "integer"}: Ratings equal to or greater than 3 are positive items.
 
+rnames = ['user_id','book_id','rating','u_id','b_id','ts']
+raw_ratings = pd.read_table('ratings.dat', sep=',', 
+                                header=rnames, engine='python',
+                                encoding='latin-1')
+
 config_dict = {
     "num_samples_per_user": 500,
-    "num_users": 670,
-    "num_items": 3883,
+    "num_users": len(set(raw_ratings['u_id'].values)),
+    "num_items": len(set(raw_ratings['b_id'].values)),
 
-    "epochs": 100,
+    "epochs": 25,
     "batch_size": 128,
     "lr": 0.001,
     "weight_decay": 0.1,
 
     "embedding_size": 64,
-    "num_layers": 100,
-    "K": 10,
+    "num_layers": 4,
+    "K": 20,
     "mf_rank": 8,
 
     "minibatch_per_print": 100,
@@ -59,18 +67,24 @@ config_dict = {
     "model_name": "model.pth"
 }
 model_config = {
-    "n_users": 670,
-    "m_items": 3883,
+    "n_users": config_dict["num_users"],
+    "m_items": config_dict["num_items"],
     "embedding_size": config_dict["embedding_size"],
     "num_layers": config_dict["num_layers"],
     "lr": 0.001
 }
 
+"""# Dataset
+
+A great publicly available dataset for training movie recommenders is the MovieLens 1M dataset. The MovieLens 1M dataset consists of 1 million movie ratings of score 1 to 5, from 6000 users and 4000 movies.
+"""
+
 DATA_PATH = "https://files.grouplens.org/datasets/movielens/ml-1m.zip"
+# getcontext().prec = 10
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
+# device="cpu"
 
 
 def trans_ml(dat, thres):
@@ -86,14 +100,14 @@ def trans_ml(dat, thres):
     return dat
 
 
-class MovieLens(Dataset):
+class Goodreads(Dataset):
     def __init__(self, root, transform=None, pre_transform=None,
             transform_args=None, pre_transform_args=None):
         """
         root = where the dataset should be stored. This folder is split
         into raw_dir (downloaded dataset) and processed_dir (process data).
         """
-        super(MovieLens, self).__init__(root, transform, pre_transform)
+        super(Goodreads, self).__init__(root, transform, pre_transform)
         self.transform = transform
         self.pre_transform = pre_transform
         self.transform_args = transform_args
@@ -101,7 +115,7 @@ class MovieLens(Dataset):
 
     @property
     def raw_file_names(self):
-        return "ml-1m.zip"
+        return "ML_100K_Text.zip"
 
     @property
     def processed_file_names(self):
@@ -112,49 +126,53 @@ class MovieLens(Dataset):
         download_url(DATA_PATH, self.raw_dir)
 
     def _load(self):
-        with zipfile.ZipFile(self.raw_paths[0], 'r') as zip_ref:
-            zip_ref.extractall(self.raw_dir)
-        unames = ['user_id', 'gender', 'age', 'occupation', 'zip']
-        users = pd.read_table('users.dat', 
-                              sep='::', header=None, names=unames,
-                              engine='python', encoding='latin-1')
-        rnames = ['user_id', 'movie_id', 'rating', 'timestamp']
-        ratings = pd.read_table('ratings.dat', sep='::', 
-                                header=None, names=rnames, engine='python',
+        rnames = ['user_id','book_id','rating','u_id','b_id','ts']
+        ratings = pd.read_table('ratings.dat', sep=',', 
+                                header=rnames,  engine='python',
                                 encoding='latin-1')
-        mnames = ['movie_id', 'title', 'genres']
-        movies = pd.read_table('movies.dat', sep='::', 
-                               header=None, names=mnames, engine='python',
-                               encoding='latin-1')
-        dat = pd.merge(pd.merge(ratings, users), movies)
+        dat = ratings
 
-        return users, ratings, movies, dat
+        return ratings,  dat
 
     def process(self):
-        # print('run process')
+        print('run process')
         # load information from file
-        users, ratings, movies, dat = self._load()
+        ratings, dat = self._load()
 
-        users = users['user_id']
-        movies = movies['movie_id']
+        users = list(set(ratings['u_id'].values))
+        movies = list(set(ratings['b_id'].values))
 
         num_users = config_dict["num_users"]
         if num_users != -1:
             users = users[:num_users]
 
+        user_ids = range(len(users))
+        movie_ids = range(len(movies))
+
+        user_to_id = dict(zip(users, user_ids))
+        movie_to_id = dict(zip(movies, movie_ids))
 
         # get adjacency info
-        self.num_user = users.shape[0]
-        self.num_item = movies.shape[0]
+        self.num_user = len(users)
+        self.num_item = len(movies)
 
         # initialize the adjacency matrix
         rat = torch.zeros(self.num_user, self.num_item)
 
+        for index, row in ratings.iterrows():
+            user=row[8]
+            movie=row[9]
+            rating=row[5]
+            # user, movie, rating = row[:3]
+            if num_users != -1:
+                if user not in user_to_id: break
+            # create ratings matrix where (i, j) entry represents the ratings
+            # of movie j given by user i.
+            rat[user_to_id[user], movie_to_id[movie]] = rating
 
         # create Data object
         data = Data(edge_index = rat,
                     raw_edge_index = rat.clone(),
-                    data = ratings,
                     users = users,
                     items = movies)
 
@@ -162,11 +180,14 @@ class MovieLens(Dataset):
         if self.pre_transform is not None:
             data = self.pre_transform(data, self.pre_transform_args)
 
+        # apply any post_transformation
+        # if self.transform is not None:
+        #     # data = self.transform(data, self.transform_args)
         data = self.transform(data, [rating_threshold])
 
         # save the processed data into .pt file
         torch.save(data, osp.join(self.processed_dir, f'data.pt'))
-        # print('process finished')
+        print('process finished')
       
     def len(self):
         """
@@ -182,26 +203,49 @@ class MovieLens(Dataset):
         data = torch.load(osp.join(self.processed_dir, 'data.pt'))
         return data
 
-
-
-
-# episodes, train_set, test_set = preprocess()
 with open('sessions.txt', 'rb') as f:
       episodes=pickle.load(f)
 with open('train_sessions.txt', 'rb') as f:
       train_sessions=pickle.load(f)
 with open('test_sessions.txt', 'rb') as f:
       test_sessions=pickle.load(f)
+
+
+
+
+with open('test_user_item.txt', "rb") as f:
+    test_user_item = pickle.load(f)
 # episodes.to(device)
 root = os.getcwd()
-movielens = MovieLens(root=root, transform=trans_ml)
+movielens = Goodreads(root=root, transform=trans_ml)
 data = movielens.get()
+ratings, dat = movielens._load()
+# Movies_df=movies
+raw=pd.read_csv("ratings.dat", sep=',')
+users = list(set(raw['u_id'].values))
+movies = list(set(raw['b_id'].values))
+
+sessions_per_user=[]
+test_sessions_new=[]
+for user in users:
+    s=[]
+    for episode in episodes:
+        if episode['u_id'].min()==user:
+            s.append(episode['session_id'].min())
+    sessions_per_user.append(s)
+    # print(s)
+    test_sessions_new.append(np.random.randint(0, len(s), 1))
+
+# print(test_sessions_new)
 
 
-users, ratings, movies, dat = movielens._load()
-Movies_df=movies
-users = users['user_id']
-movies = movies['movie_id']
+
+# with open('valid_train_movies.txt', 'rb') as f:
+#     movies=pickle.load(f)
+print(f"#users={len(users)}")
+print(f"#books={len(movies)}")
+print(f"#train sessions={len(train_sessions)}")
+print(f"#test sessions={len(test_sessions)}")
 user_ids = range(len(users))
 movie_ids = range(len(movies))
 
@@ -211,7 +255,7 @@ id_to_movie = dict(zip(movies, movie_ids))
 
 
 
-num_epochs_list=[100]
+num_epochs=50
 reward_test_hist = []
 genre_reward_test_hist = []
 tail_reward_hist = []
@@ -224,32 +268,40 @@ for i in range(len(users)):
 movie_ctr=np.zeros(len(movies))
 
 for idx, episode in enumerate(episodes):
-    user_movies_all[user_to_id[episode['user_id'].min()]].extend(episode['item_id'].values)
+    user_movies_all[user_to_id[episode['u_id'].min()]].extend(episode['b_id'].values)
+
+train_episodes=[]
+test_episodes=[]
+for episode in episodes:
+    if episode['session_id'].min()  in train_sessions:
+        train_episodes.append(episode)
+
+for episode in episodes:
+    if episode['session_id'].min() in test_sessions:
+        test_episodes.append(episode)
+
+print(f"#users={len(users)}")
+print(f"#movies={len(movies)}")
+print(f"#train sessions={len(train_episodes)}")
+print(f"#test sessions={len(test_sessions)}")
+num_epochs_list=[50]
+gamma=0.95
 
 
 
 for num_epochs in num_epochs_list:
-    brain = GRRS_Warm_Agent(model_config=model_config, device=device, gamma=0.9, epsilon=1.0, batch_size=512, alpha=0.001)
+    brain = WarmAgent(model_config=model_config, device=device, gamma=0.5, epsilon=1.0, batch_size=512, alpha=0.0005)
     ########################### Training########################################################
-    # print(data['edge_index'])
+    print(data['edge_index'])
     all_users_items = brain.lightGCN.embedding_user_item.weight.cpu().detach()
-    rec10_list=[]
-    rec15_list=[]
-    rec20_list=[]
     for epoch in range(num_epochs):
-        print(f"Epoch={epoch}/{num_epochs}")
         # print(epoch)
         reward_test=0
         genre_reward=0
         tail_reward =0
         recall =[]
-        movielens = MovieLens(root=root, transform=trans_ml)
+        movielens = Goodreads(root=root, transform=trans_ml)
         data = movielens.get()
-        users, ratings, movies, dat = movielens._load()
-        users = users['user_id']
-        movies = movies['movie_id']
-        user_ids = range(len(users))
-        movie_ids = range(len(movies))
         w_h_d={} # all users watched history
         r_h_d={} # all users rating history
         
@@ -265,11 +317,11 @@ for num_epochs in num_epochs_list:
         seq_reward_hist=[]
         actions_recommeded_hist=[]
         movie_ctr=np.zeros(config_dict["num_items"])
-        for episode in episodes:
+        for episode in train_episodes:
             if episode['session_id'].min() in train_sessions:
                 num_ep += 1
-                # print(f"Max epochs={num_epochs}, Epoch={epoch}, Episode={num_ep-1}")
-                user_id=episode['user_id'].min()
+                print(f"Max epochs={num_epochs}, Epoch={epoch}, Episode={num_ep-1}/{len(train_sessions)}")
+                user_id=episode['u_id'].min()
 
                 user_index_list=[user_to_id[user_id]]
                 temp=state_selection(brain.lightGCN,all_users_items, data, user_to_id[user_id], w_h_d[user_to_id[user_id]], r_h_d[user_to_id[user_id]], config_dict, feature_dim=config_dict["embedding_size"])
@@ -288,11 +340,9 @@ for num_epochs in num_epochs_list:
                         terminal=True
                 
     
-                    actual_movie_seen=episode['item_id'].values[t]
+                    actual_movie_seen=episode['b_id'].values[t]
                     movie_ctr[movie_to_id[actual_movie_seen]] += 1
                     m_id = movie_to_id[actual_movie_seen]
-                    actual_genre=Movies_df['genres'][m_id].split('|') 
-        
                     rating = episode['rating'].values[t]
                 
                 
@@ -302,10 +352,12 @@ for num_epochs in num_epochs_list:
                     if movie_to_id[actual_movie_seen] in action_list_K:
                         reward = 1
 
+                    # recommended_action = action_list_K[0]
 
 
                     w_h_d_true = w_h_d
                     r_h_d_true = r_h_d
+                    # for recommended_action in action_list_K:
                     recommended_action = action_list_K[0]
 
                     w_h_d[user_to_id[user_id]].append(recommended_action)
@@ -321,7 +373,10 @@ for num_epochs in num_epochs_list:
 
                     
 
+
+                    # rat=data_orig["edge_index"]
                     reward_orig= 1 if rating >= 3 else -1
+                    # reward_orig = 1
                     
                     w_h_d = w_h_d_true
                     r_h_d = r_h_d_true
@@ -347,22 +402,138 @@ for num_epochs in num_epochs_list:
 
 
     ###################### Testing ###############################################
+
+        for popularity in [10]:
+            recall_per_user=[]
+            for episode in episodes:
+                if episode['session_id'].min() in test_sessions:
+                    testing=True
+                    user_id=episode['u_id'].min()
+                    temp=state_selection(brain.lightGCN, all_users_items, data, user_to_id[user_id], w_h_d[user_to_id[user_id]], r_h_d[user_to_id[user_id]], config_dict, feature_dim=config_dict["embedding_size"])
+                    # print(temp)
+                    state=temp.clone().detach()
+                    actual_movies_seen=episode['b_id'].values
+                    m_ids=[]
+                    for movie in list(actual_movies_seen):
+                        m_ids.append(movie)
+                    m_ids = list(set(m_ids).union(set(user_movies_all[user_to_id[user_id]])))
+                    m_ids_new=[]
+                    for movie in m_ids:
+                        m_ids_new.append(movie_to_id[movie])
+                    m_ids = m_ids_new
+                    # actual_genre=Movies_df['genres'][m_id].split('|') 
+                    
+                    # rating = episode['rating'].values[t]
+                            
+                            
+                    action_list_K,  action_list_full = brain.chooseAction(state, testing, w_h_d[user_to_id[user_id]], K=10, movie_ctr=movie_ctr, popularity=popularity)
+                    new_action_list=[]
+                    for m in action_list_K:
+                        if movie_ctr[m]>popularity-1:
+                            new_action_list.append(m)
+                    new_m_ids=[]
+                    for m in m_ids:
+                        if movie_ctr[m]>popularity-1:
+                            new_m_ids.append(m)
+                    if len(new_action_list)>0:
+                        recall_per_user.append(len(set(new_action_list).intersection(set(new_m_ids)))/len(new_action_list))     
+            # print(round(float(recall_per_user), 6))
+            if len(recall_per_user)>0:
+                print(f"Popularity status={popularity}, Mean Recall K10={round(float(np.mean(recall_per_user)), 6)}")
+                # print(f"Popularity status={popularity}, Max RecallK20={round(float(np.max(recall_per_user)), 6)}")
+                # print(f"Popularity status={popularity}, Median RecallK20={round(float(np.median(recall_per_user)), 6)}")
+        for popularity in [10]:
+            recall_per_user=[]
+            for episode in episodes:
+                if episode['session_id'].min() in test_sessions:
+                    testing=True
+                    user_id=episode['u_id'].min()
+                    temp=state_selection(brain.lightGCN, all_users_items, data, user_to_id[user_id], w_h_d[user_to_id[user_id]], r_h_d[user_to_id[user_id]], config_dict, feature_dim=config_dict["embedding_size"])
+                    # print(temp)
+                    state=temp.clone().detach()
+                    actual_movies_seen=episode['b_id'].values
+                    m_ids=[]
+                    for movie in list(actual_movies_seen):
+                        m_ids.append(movie)
+                    m_ids = list(set(m_ids).union(set(user_movies_all[user_to_id[user_id]])))
+                    m_ids_new=[]
+                    for movie in m_ids:
+                        m_ids_new.append(movie_to_id[movie])
+                    m_ids = m_ids_new
+                    # actual_genre=Movies_df['genres'][m_id].split('|') 
+                    
+                    # rating = episode['rating'].values[t]
+                            
+                            
+                    action_list_K,  action_list_full = brain.chooseAction(state, testing, w_h_d[user_to_id[user_id]], K=5, movie_ctr=movie_ctr, popularity=popularity)
+                    new_action_list=[]
+                    for m in action_list_K:
+                        if movie_ctr[m]>popularity-1:
+                            new_action_list.append(m)
+                    new_m_ids=[]
+                    for m in m_ids:
+                        if movie_ctr[m]>popularity-1:
+                            new_m_ids.append(m)
+                    if len(new_action_list)>0:
+                        recall_per_user.append(len(set(new_action_list).intersection(set(new_m_ids)))/len(new_action_list))     
+            # print(round(float(recall_per_user), 6))
+            if len(recall_per_user)>0:
+                print(f"Popularity status={popularity}, Mean Recall K5={round(float(np.mean(recall_per_user)), 6)}")
+                # print(f"Popularity status={popularity}, Max RecallK20={round(float(np.max(recall_per_user)), 6)}")
+                # print(f"Popularity status={popularity}, Median RecallK20={round(float(np.median(recall_per_user)), 6)}")
         
 
+        for popularity in [10]:
+            recall_per_user=[]
+            for episode in episodes:
+                if episode['session_id'].min() in test_sessions:
+                    testing=True
+                    user_id=episode['u_id'].min()
+                    temp=state_selection(brain.lightGCN, all_users_items, data, user_to_id[user_id], w_h_d[user_to_id[user_id]], r_h_d[user_to_id[user_id]], config_dict, feature_dim=config_dict["embedding_size"])
+                    # print(temp)
+                    state=temp.clone().detach()
+                    actual_movies_seen=episode['b_id'].values
+
+                    m_ids=[]
+                    for movie in list(actual_movies_seen):
+                        m_ids.append(movie)
+                    
+                    m_ids = list(set(m_ids).union(set(user_movies_all[user_to_id[user_id]])))
+                    m_ids_new=[]
+                    for movie in m_ids:
+                        m_ids_new.append(movie_to_id[movie])
+                    m_ids = m_ids_new
+                    # actual_genre=Movies_df['genres'][m_id].split('|') 
+                    
+                    # rating = episode['rating'].values[t]
+                            
+                            
+                    action_list_K,  action_list_full = brain.chooseAction(state, testing, w_h_d[user_to_id[user_id]], K=len(actual_movies_seen), movie_ctr=movie_ctr, popularity=popularity)
+                    new_action_list=[]
+                    for m in action_list_K:
+                        if movie_ctr[m]>popularity-1:
+                            new_action_list.append(m)
+                    new_m_ids=[]
+                    for m in m_ids:
+                        if movie_ctr[m]>popularity-1:
+                            new_m_ids.append(m)
+                    if len(new_action_list)>0:
+                        recall_per_user.append(len(set(new_action_list).intersection(set(new_m_ids)))/len(new_action_list))     
+            # print(round(float(recall_per_user), 6))
+            if len(recall_per_user)>0:
+                print(f"Popularity status={popularity}, Mean Recall New={round(float(np.mean(recall_per_user)), 6)}")
+                # print(f"Popularity status={popularity}, Max RecallK20={round(float(np.max(recall_per_user)), 6)}")
         
-      
+        popularity = 10
         for popularity in [5]:
                 recall_per_user=[]
                 for episode in episodes:
                     if episode['session_id'].min() in test_sessions:
                         testing=True
-                        user_id=episode['user_id'].min()
+                        user_id=episode['u_id'].min()
                         state = all_users_items[user_to_id[user_id]]
-                        # temp=state_selection(brain.lightGCN, all_users_items, data, user_to_id[user_id], [], [], config_dict, feature_dim=config_dict["embedding_size"])
-                        # # print(temp)
-                        # state=temp.detach().clone()
-
-                        actual_movies_seen=episode['item_id'].values
+              
+                        actual_movies_seen=episode['b_id'].values
 
                         m_ids=[]
                         for movie in list(actual_movies_seen):
@@ -373,9 +544,6 @@ for num_epochs in num_epochs_list:
                         for movie in m_ids:
                             m_ids_new.append(movie_to_id[movie])
                         m_ids = m_ids_new
-                        # actual_genre=Movies_df['genres'][m_id].split('|') 
-                        
-                        # rating = episode['rating'].values[t]
                                 
                                 
                         action_list_K,  action_list_full = brain.chooseAction(state, testing, w_h_d[user_to_id[user_id]], K=10, movie_ctr=movie_ctr, popularity=popularity)
@@ -384,7 +552,7 @@ for num_epochs in num_epochs_list:
                             if movie_ctr[m]>popularity-1:
                                 new_action_list.append(m)
                         recommended_movies=new_action_list
-                  
+                   
                         new_m_ids=[]
                         for m in m_ids:
                             if movie_ctr[m]>1:
@@ -393,11 +561,10 @@ for num_epochs in num_epochs_list:
                         # if L>0:
                         if L>0:
                             K=10
-                            recall_per_user.append(len(set(recommended_movies).intersection(set(m_ids)))/L)     
+                            recall_per_user.append(len(set(recommended_movies).intersection(set(m_ids)))/K)     
                 # print(round(float(recall_per_user), 6))
                 if len(recall_per_user)>0:
-                    # print(f"Rec@10={round(float(np.mean(recall_per_user)), 6)}")
-                    rec10_list.append(np.mean(recall_per_user))
+                    print(f"Rec@10={round(float(np.mean(recall_per_user)), 6)}")
                     # print(f"ALPHA={alpha} Max RecallK20={round(float(np.max(recall_per_user)), 6)}")
                     # print(f"ALPHA={alpha} Median RecallK20={round(float(np.median(recall_per_user)), 6)}")        
 
@@ -407,13 +574,10 @@ for num_epochs in num_epochs_list:
                 for episode in episodes:
                     if episode['session_id'].min() in test_sessions:
                         testing=True
-                        user_id=episode['user_id'].min()
+                        user_id=episode['u_id'].min()
                         state = all_users_items[user_to_id[user_id]]
-                        # temp=state_selection(brain.lightGCN, all_users_items, data, user_to_id[user_id], [], [], config_dict, feature_dim=config_dict["embedding_size"])
-                        # # print(temp)
-                        # state=temp.detach().clone()
-
-                        actual_movies_seen=episode['item_id'].values
+                
+                        actual_movies_seen=episode['b_id'].values
 
                         m_ids=[]
                         for movie in list(actual_movies_seen):
@@ -435,7 +599,7 @@ for num_epochs in num_epochs_list:
                             if movie_ctr[m]>popularity-1:
                                 new_action_list.append(m)
                         recommended_movies=new_action_list
-                      
+                
                         new_m_ids=[]
                         for m in m_ids:
                             if movie_ctr[m]>1:
@@ -443,12 +607,11 @@ for num_epochs in num_epochs_list:
                         L=len(new_m_ids)- len(set(w_h_d[user_to_id[user_id]]))
                         # if L>0:
                         if L>0:
-                            K=15
-                            recall_per_user.append(len(set(recommended_movies).intersection(set(m_ids)))/L)     
+                            K=10
+                            recall_per_user.append(len(set(recommended_movies).intersection(set(m_ids)))/K)     
                 # print(round(float(recall_per_user), 6))
                 if len(recall_per_user)>0:
-                    # print(f"Rec@15={round(float(np.mean(recall_per_user)), 6)}")
-                    rec15_list.append(np.mean(recall_per_user))
+                    print(f"Rec@15={round(float(np.mean(recall_per_user)), 6)}")
                     # print(f"ALPHA={alpha} Max RecallK20={round(float(np.max(recall_per_user)), 6)}")
                     # print(f"ALPHA={alpha} Median RecallK20={round(float(np.median(recall_per_user)), 6)}")        
 
@@ -458,13 +621,10 @@ for num_epochs in num_epochs_list:
                 for episode in episodes:
                     if episode['session_id'].min() in test_sessions:
                         testing=True
-                        user_id=episode['user_id'].min()
+                        user_id=episode['u_id'].min()
                         state = all_users_items[user_to_id[user_id]]
-                        # temp=state_selection(brain.lightGCN, all_users_items, data, user_to_id[user_id], [], [], config_dict, feature_dim=config_dict["embedding_size"])
-                        # # print(temp)
-                        # state=temp.detach().clone()
-
-                        actual_movies_seen=episode['item_id'].values
+            
+                        actual_movies_seen=episode['b_id'].values
 
                         m_ids=[]
                         for movie in list(actual_movies_seen):
@@ -475,9 +635,6 @@ for num_epochs in num_epochs_list:
                         for movie in m_ids:
                             m_ids_new.append(movie_to_id[movie])
                         m_ids = m_ids_new
-                        # actual_genre=Movies_df['genres'][m_id].split('|') 
-                        
-                        # rating = episode['rating'].values[t]
                                 
                                 
                         action_list_K,  action_list_full = brain.chooseAction(state, testing, w_h_d[user_to_id[user_id]], K=20, movie_ctr=movie_ctr, popularity=popularity)
@@ -486,20 +643,18 @@ for num_epochs in num_epochs_list:
                             if movie_ctr[m]>popularity-1:
                                 new_action_list.append(m)
                         recommended_movies=new_action_list
-                      
+                
                         new_m_ids=[]
                         for m in m_ids:
                             if movie_ctr[m]>1:
                                 new_m_ids.append(m)
                         L=len(new_m_ids)- len(set(w_h_d[user_to_id[user_id]]))
+                        # if L>0:
                         if L>0:
-                            K=20
-                            recall_per_user.append(len(set(recommended_movies).intersection(set(m_ids)))/L)     
+                            K=10
+                            recall_per_user.append(len(set(recommended_movies).intersection(set(m_ids)))/K)     
+                # print(round(float(recall_per_user), 6))
                 if len(recall_per_user)>0:
-                    # print(f"Rec@20={round(float(np.mean(recall_per_user)), 6)}")
-                    rec20_list.append(np.mean(recall_per_user))
-
-
-    print(f'Recall@10={max(rec10_list)}')
-    print(f'Recall@15={max(rec15_list)}')
-    print(f'Recall@20={max(rec20_list)}')
+                    print(f"Rec@20={round(float(np.mean(recall_per_user)), 6)}")
+                    # print(f"ALPHA={alpha} Max RecallK20={round(float(np.max(recall_per_user)), 6)}")
+                    # print(f"ALPHA={alpha} Median RecallK20={round(float(np.median(recall_per_user)), 6)}")        
