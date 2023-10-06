@@ -60,7 +60,7 @@ config_dict = {
     "weight_decay": 0.1,
 
     "embedding_size": 64,
-    "num_layers": 10,
+    "num_layers": 4,
     "K": 15,
     "mf_rank": 8,
 
@@ -94,7 +94,7 @@ def trans_ml(dat, thres):
     return dat
 
 
-class MovieLens(Dataset):
+class Goodreads(Dataset):
     def __init__(self, root, transform=None, pre_transform=None,
             transform_args=None, pre_transform_args=None):
         """
@@ -109,7 +109,7 @@ class MovieLens(Dataset):
 
     @property
     def raw_file_names(self):
-        return "ml-1m.zip"
+        return "goodreads.zip"
 
     @property
     def processed_file_names(self):
@@ -120,50 +120,19 @@ class MovieLens(Dataset):
         download_url(DATA_PATH, self.raw_dir)
 
     def _load(self):
-        print(self.raw_dir)
-        # extract_zip(self.raw_paths[0], self.raw_dir)
-        with zipfile.ZipFile(self.raw_paths[0], 'r') as zip_ref:
-            zip_ref.extractall(self.raw_dir)
-        unames = ['user_id', 'gender', 'age', 'occupation', 'zip']
-        users = pd.read_table('users.dat', 
-                              sep='::', header=None, names=unames,
-                              engine='python', encoding='latin-1')
-        rnames = ['user_id', 'movie_id', 'rating', 'timestamp']
-        ratings = pd.read_table('ratings.dat', sep='::', 
-                                header=None, names=rnames, engine='python',
+        rnames = ['user_id','item_id','rating','ts','u_id','b_id','session_id']
+        ratings = pd.read_table('ratings.dat', sep=',', header=0,  engine='python',
                                 encoding='latin-1')
-        mnames = ['movie_id', 'title', 'genres']
-        movies = pd.read_table('movies.dat', sep='::', 
-                               header=None, names=mnames, engine='python',
-                               encoding='latin-1')
-        dat = pd.merge(pd.merge(ratings, users), movies)
+        dat = ratings
 
-        return users, ratings, movies, dat
+        return ratings,  dat
 
     def process(self):
         print('run process')
-        # load information from file
-        users, ratings, movies, dat = self._load()
-        U=users
-        U_array=U[['gender', 'age']].to_numpy()
-        features=[]
-        for t in range(U.shape[0]):
-            features.append(list(U_array[t]))
+        ratings, dat = self._load()
 
-        
-        M=movies
-        all_genres=[]
-        for t in range(movies.shape[0]):
-            g=movies['genres'].values[t]
-            all_genres.extend(g.split('|'))
-        all_genres=list(set(all_genres))
-        genre_to_num=dict(zip(all_genres, range(len(all_genres))))
-        # M_array=M[['genres']].to_numpy()
-        for t in range(M.shape[0]):
-            features.append(list(np.pad(np.array([genre_to_num[movies['genres'].values[t].split('|')[0]]]),(0,1))))
-        print(len(features))
-        users = users['user_id']
-        movies = movies['movie_id']
+        users = list(set(ratings['u_id'].values))
+        movies = list(set(ratings['b_id'].values))
 
         num_users = config_dict["num_users"]
         if num_users != -1:
@@ -176,14 +145,17 @@ class MovieLens(Dataset):
         movie_to_id = dict(zip(movies, movie_ids))
 
         # get adjacency info
-        self.num_user = users.shape[0]
-        self.num_item = movies.shape[0]
+        self.num_user = len(users)
+        self.num_item = len(movies)
 
         # initialize the adjacency matrix
         rat = torch.zeros(self.num_user, self.num_item)
 
         for index, row in ratings.iterrows():
-            user, movie, rating = row[:3]
+            user=row[8]
+            movie=row[9]
+            rating=row[5]
+            # user, movie, rating = row[:3]
             if num_users != -1:
                 if user not in user_to_id: break
             # create ratings matrix where (i, j) entry represents the ratings
@@ -193,7 +165,6 @@ class MovieLens(Dataset):
         # create Data object
         data = Data(edge_index = rat,
                     raw_edge_index = rat.clone(),
-                    data = ratings,
                     users = users,
                     items = movies)
 
@@ -523,12 +494,15 @@ Now, let's pretraining!
 """
 
 root = os.getcwd()
-movielens = MovieLens(root=root, transform=trans_ml)
+movielens = Goodreads(root=root, transform=trans_ml)
 data = movielens.get()
-users, ratings, movies, dat = movielens._load()
-Movies_df=movies
-users = users['user_id']
-movies = movies['movie_id']
+ratings, dat = movielens._load()
+# Movies_df=movies
+raw=pd.read_csv("GR_moreinteractions_669users.csv", sep=',')
+users = list(set(raw['u_id'].values))
+movies = list(set(raw['b_id'].values))
+# with open('valid_train_movies.txt', 'rb') as f:
+#     movies=pickle.load(f)
 user_ids = range(len(users))
 movie_ids = range(len(movies))
 
@@ -536,14 +510,14 @@ user_to_id = dict(zip(users, user_ids))
 movie_to_id = dict(zip(movies, movie_ids))
 id_to_movie = dict(zip(movies, movie_ids))
 
-n_users = len(data["users"].unique())
-m_items = len(data["items"].unique())
-train_mask = torch.ones(n_users, m_items)
 
 
 with open("test_user_item.txt", 'rb') as f:
     test_user_item=pickle.load(f)
 
+n_users = len(users)
+m_items = len(movies)
+train_mask = torch.ones(n_users, m_items)
 for (u,v) in test_user_item:
     train_mask[user_to_id[u],movie_to_id[v]] = 0
 
