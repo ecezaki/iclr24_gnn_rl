@@ -3,8 +3,8 @@
 
 This is a sample code for the GRRS algorithm which combines GNN and DQN for session-based recommendation 
 (with warm network initialization).
-This code is written to work on the MovieLens-1m dataset.
-Files we require are: "users.dat", "movies.dat","ratings.dat"
+This code is written to work on the Goodreads dataset.
+Files we require are: "ratings.dat" which contains the user id, item id, rating and timestamp for every interaction.
 
 Procedure to run: 
 1) python preprocess.py
